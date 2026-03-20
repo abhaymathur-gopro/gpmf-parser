@@ -61,6 +61,7 @@ void printHelp(char *name) {
       "       -FX - fuzz loop for X times (defaults to GPMF fuzzing only)\n");
   printf("       -MX - fuzz the mp4 index with X random changes\n");
   printf("       -GX - fuzz each GPMF payload X random changes\n");
+  printf("       -m - machine readable metadata output\n");
   printf("       -h - this help\n");
   printf("       \n");
   printf("       ver 2.0\n");
@@ -73,6 +74,7 @@ uint32_t show_scaled_data = SHOW_SCALED_DATA;
 uint32_t show_computed_samplerates = SHOW_COMPUTED_SAMPLERATES;
 uint32_t show_video_framerate = SHOW_VIDEO_FRAMERATE;
 uint32_t show_payload_time = SHOW_PAYLOAD_TIME;
+uint32_t show_machine_readable = 0;
 uint32_t show_this_four_cc = 0;
 
 int mp4fuzzchanges = 0;
@@ -117,6 +119,9 @@ int main(int argc, char *argv[]) {
         break;
       case 't':
         show_payload_time ^= 1;
+        break;
+      case 'm':
+        show_machine_readable = 1;
         break;
       case 'f':
         show_this_four_cc = STR2FOURCC((&(argv[i][2])));
@@ -224,6 +229,14 @@ GPMF_ERR readMP4File(char *filename) {
   uint32_t *payload = NULL;
   uint32_t payloadsize = 0;
   size_t payloadres = 0;
+
+  char utc_time[64] = "n/a";
+  double lat = 0, lon = 0;
+  int found_gps = 0;
+  uint32_t total_faces = 0;
+  char face_details[512] = "";
+  char scene_details[512] = "";
+
 #if 1 // Search for GPMF Track
   size_t mp4handle =
       OpenMP4Source(filename, MOV_GPMF_TRAK_TYPE, MOV_GPMF_TRAK_SUBTYPE, 0);
@@ -256,7 +269,7 @@ GPMF_ERR readMP4File(char *filename) {
   if (metadatalength > 0.0) {
     uint32_t index, payloads = GetNumberPayloads(mp4handle);
     //		printf("found %.2fs of metadata, from %d payloads, within %s\n",
-    //metadatalength, payloads, argv[1]);
+    // metadatalength, payloads, argv[1]);
 
     uint32_t fr_num, fr_dem;
     uint32_t frames = GetVideoFrameRateAndCount(mp4handle, &fr_num, &fr_dem);
@@ -293,6 +306,67 @@ GPMF_ERR readMP4File(char *filename) {
       if (ret != GPMF_OK)
         goto cleanup;
 
+      if (show_machine_readable) {
+        GPMF_ResetState(ms);
+        if (!found_gps && GPMF_OK == GPMF_FindNext(ms, STR2FOURCC("GPSU"),
+                                                   GPMF_RECURSE_LEVELS)) {
+          char *data = (char *)GPMF_RawData(ms);
+          uint32_t size = GPMF_RawDataSize(ms);
+          if (size < 64) {
+            memcpy(utc_time, data, size);
+            utc_time[size] = 0;
+          }
+        }
+        GPMF_ResetState(ms);
+        if (!found_gps && GPMF_OK == GPMF_FindNext(ms, STR2FOURCC("GPS5"),
+                                                   GPMF_RECURSE_LEVELS)) {
+          double xyz[5];
+          if (GPMF_OK ==
+              GPMF_ScaledData(ms, xyz, sizeof(xyz), 0, 1, GPMF_TYPE_DOUBLE)) {
+            lat = xyz[0];
+            lon = xyz[1];
+            found_gps = 1;
+          }
+        }
+        GPMF_ResetState(ms);
+        while (GPMF_OK ==
+               GPMF_FindNext(ms, STR2FOURCC("FCNM"), GPMF_RECURSE_LEVELS)) {
+          uint32_t count = 0;
+          GPMF_ScaledData(ms, &count, 4, 0, 1, GPMF_TYPE_UNSIGNED_LONG);
+          total_faces += count;
+        }
+        GPMF_ResetState(ms);
+        if (face_details[0] == 0 &&
+            GPMF_OK ==
+                GPMF_FindNext(ms, STR2FOURCC("FACE"), GPMF_RECURSE_LEVELS)) {
+          uint32_t samples = GPMF_Repeat(ms);
+          uint32_t elements = GPMF_ElementsInStruct(ms);
+          uint32_t buffersize = samples * elements * sizeof(double);
+          double *tmp = (double *)malloc(buffersize);
+          if (tmp) {
+            if (GPMF_OK == GPMF_ScaledData(ms, tmp, buffersize, 0, samples,
+                                           GPMF_TYPE_DOUBLE)) {
+              sprintf(face_details, "found %d faces", samples);
+            }
+            free(tmp);
+          }
+        }
+        GPMF_ResetState(ms);
+        if (scene_details[0] == 0 &&
+            GPMF_OK ==
+                GPMF_FindNext(ms, STR2FOURCC("SCEN"), GPMF_RECURSE_LEVELS)) {
+          uint32_t key = 0;
+          float prob = 0;
+          // SCEN is often complex: FourCC + float
+          char *data = (char *)GPMF_RawData(ms);
+          if (GPMF_RawDataSize(ms) >= 8) {
+            sprintf(scene_details, "%c%c%c%c", data[0], data[1], data[2],
+                    data[3]);
+          }
+        }
+        GPMF_ResetState(ms);
+      }
+
       if (show_payload_time && fuzzloopcount == 0)
         if (show_gpmf_structure || show_payload_index || show_scaled_data)
           if (show_all_payloads || index == 0)
@@ -326,10 +400,11 @@ GPMF_ERR readMP4File(char *filename) {
 
             nextret = GPMF_Next(ms, GPMF_RECURSE_LEVELS | GPMF_TOLERANT);
 
-            while (nextret ==
-                   GPMF_ERROR_UNKNOWN_TYPE) // or just using GPMF_Next(ms,
-                                            // GPMF_RECURSE_LEVELS|GPMF_TOLERANT)
-                                            // to ignore and skip unknown types
+            while (
+                nextret ==
+                GPMF_ERROR_UNKNOWN_TYPE) // or just using GPMF_Next(ms,
+                                         // GPMF_RECURSE_LEVELS|GPMF_TOLERANT)
+                                         // to ignore and skip unknown types
               nextret = GPMF_Next(ms, GPMF_RECURSE_LEVELS);
 
           } while (GPMF_OK == nextret);
@@ -572,6 +647,13 @@ GPMF_ERR readMP4File(char *filename) {
                    PRINTF_4CC(fourcc), rate, start, end);
         }
       }
+    }
+
+    if (show_machine_readable) {
+      printf("RESULT_METADATA|%s|%.3f|%s|%.6f|%.6f|%u|%s|%s\n", filename,
+             GetVideoDuration(mp4handle), utc_time, lat, lon, total_faces,
+             face_details[0] ? face_details : "none",
+             scene_details[0] ? scene_details : "none");
     }
 
   cleanup:
