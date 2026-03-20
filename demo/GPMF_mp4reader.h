@@ -124,6 +124,7 @@ size_t OpenMP4Source(char *filename, uint32_t traktype, uint32_t subtype, int32_
 size_t OpenMP4SourceUDTA(char *filename, int32_t flags);
 void CloseSource(size_t mp4Handle);
 float GetDuration(size_t mp4Handle);
+float GetVideoDuration(size_t mp4Handle);
 uint32_t GetVideoFrameRateAndCount(size_t mp4Handle, uint32_t *numer, uint32_t *demon);
 uint32_t GetNumberPayloads(size_t mp4Handle);
 uint32_t WritePayload(size_t mp4Handle, uint32_t* payload, uint32_t payloadsize, uint32_t index);
