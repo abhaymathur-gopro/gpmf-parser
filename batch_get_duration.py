@@ -3,6 +3,11 @@ import subprocess
 import argparse
 import sys
 import csv
+import threading
+from concurrent.futures import ThreadPoolExecutor, as_completed
+
+# Global lock for thread-safe CSV writing
+csv_lock = threading.Lock()
 
 def get_video_metadata(script_path, local_path):
     """
@@ -26,10 +31,30 @@ def get_video_metadata(script_path, local_path):
     except Exception as e:
         return None, f"Exception: {str(e)}"
 
-def process_mounted_dir(mount_path, script_path, csv_path=None, dry_run=False):
+def process_single_file(file_info, script_path, csv_writer, csv_file):
+    """
+    Worker function to process a single video file.
+    """
+    full_path, display_path, csv_path = file_info
+    
+    metadata, error = get_video_metadata(script_path, full_path)
+    
+    if metadata:
+        # RESULT_METADATA|filename|duration|datetime|lat|long|max_faces|face_ids_count|face_details|scene_details
+        row = [display_path] + metadata[2:]
+        
+        with csv_lock:
+            if csv_writer:
+                csv_writer.writerow(row)
+                csv_file.flush()
+            print(f"[{threading.current_thread().name}] Processed: {display_path} (Duration={metadata[2]}s, Max Faces={metadata[6]}, Distinct Faces={metadata[7]})")
+    else:
+        print(f"[{threading.current_thread().name}] Failed: {display_path} - {error}")
+
+def process_mounted_dir(mount_path, script_path, csv_path=None, dry_run=False, num_workers=40):
     """
     Recursively walks the mounted directory and filters for the video structure.
-    Expects: <user>/<subfolder>/source/default/*.mp4
+    Processes files in parallel using ThreadPoolExecutor.
     """
     if not os.path.exists(mount_path):
         print(f"Error: Mount path '{mount_path}' does not exist.")
@@ -37,12 +62,36 @@ def process_mounted_dir(mount_path, script_path, csv_path=None, dry_run=False):
 
     print(f"Scanning mounted directory: {mount_path}...")
     
+    eligible_files = []
+    
+    for root, dirs, files in os.walk(mount_path):
+        for file in files:
+            if file.lower().endswith(".mp4"):
+                rel_path = os.path.relpath(root, mount_path)
+                parts = rel_path.split(os.sep)
+                
+                # Filter for: <user>/<subfolder>/source/default/*.mp4
+                if len(parts) >= 2 and parts[-2] == "source" and parts[-1] == "default":
+                    full_path = os.path.join(root, file)
+                    display_path = os.path.join(rel_path, file)
+                    eligible_files.append((full_path, display_path, csv_path))
+
+    if not eligible_files:
+        print("No matching videos found in the specified path structure.")
+        return
+
+    print(f"Found {len(eligible_files)} videos. Starting parallel processing (workers={num_workers})...")
+    
+    if dry_run:
+        for _, display_path, _ in eligible_files:
+            print(f"[Dry Run] Found: {display_path}")
+        return
+
     csv_file = None
     csv_writer = None
     headers = ["File Path", "Duration (s)", "DateTime (UTC)", "Latitude", "Longitude", "Max Faces", "Distinct Faces", "Face Details", "Scene Classifier"]
     
     if csv_path:
-        # Check if file exists to write headers
         file_exists = os.path.isfile(csv_path)
         csv_file = open(csv_path, mode='a', newline='')
         csv_writer = csv.writer(csv_file)
@@ -50,57 +99,26 @@ def process_mounted_dir(mount_path, script_path, csv_path=None, dry_run=False):
             csv_writer.writerow(headers)
             csv_file.flush()
 
-    count = 0
-    found_any = False
-    
     try:
-        for root, dirs, files in os.walk(mount_path):
-            for file in files:
-                if file.lower().endswith(".mp4"):
-                    rel_path = os.path.relpath(root, mount_path)
-                    parts = rel_path.split(os.sep)
-                    
-                    if len(parts) >= 2 and parts[-2] == "source" and parts[-1] == "default":
-                        found_any = True
-                        full_path = os.path.join(root, file)
-                        display_path = os.path.join(rel_path, file)
-                        
-                        print(f"\n--- Processing: {display_path} ---")
-                        
-                        if dry_run:
-                            print("[Dry Run] Skipping processing.")
-                            continue
-                            
-                        metadata, error = get_video_metadata(script_path, full_path)
-                        
-                        if metadata:
-                            # RESULT_METADATA|filename|duration|datetime|lat|long|max_faces|face_ids_count|face_details|scene_details
-                            # We replace 'filename' with the 'display_path'
-                            row = [display_path] + metadata[2:]
-                            print(f"Successfully extracted: Duration={metadata[2]}s, Max Faces={metadata[6]}, Distinct Faces={metadata[7]}")
-                            
-                            if csv_writer:
-                                csv_writer.writerow(row)
-                                csv_file.flush() # Ensure it's saved incrementally
-                                print(f"Row added to {csv_path}")
-                        else:
-                            print(f"Failed: {error}")
-                        
-                        count += 1
+        with ThreadPoolExecutor(max_workers=num_workers) as executor:
+            futures = [executor.submit(process_single_file, f, script_path, csv_writer, csv_file) for f in eligible_files]
+            for future in as_completed(futures):
+                try:
+                    future.result()
+                except Exception as e:
+                    print(f"Worker generated an exception: {e}")
     finally:
         if csv_file:
             csv_file.close()
 
-    if not found_any:
-        print("No matching videos found in the specified path structure.")
-    else:
-        print(f"\nFinished processing {count} videos.")
+    print(f"\nFinished processing {len(eligible_files)} videos.")
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Batch process GCMF video durations and metadata via gcsfuse mount.")
+    parser = argparse.ArgumentParser(description="Batch process GCMF video durations and metadata via gcsfuse mount with multithreading.")
     parser.add_argument("--mount", required=True, help="Path to the gcsfuse mount directory")
     parser.add_argument("--script", default="./get_duration.sh", help="Path to get_duration.sh")
     parser.add_argument("--csv", default="video_metadata_batch.csv", help="Output CSV file name")
+    parser.add_argument("--workers", type=int, default=40, help="Number of parallel workers (default: 40)")
     parser.add_argument("--dry-run", action="store_true", help="List files without processing")
     
     args = parser.parse_args()
@@ -108,4 +126,4 @@ if __name__ == "__main__":
     if os.path.exists(args.script):
         os.chmod(args.script, 0o755)
     
-    process_mounted_dir(args.mount, args.script, args.csv, args.dry_run)
+    process_mounted_dir(args.mount, args.script, args.csv, args.dry_run, args.workers)
