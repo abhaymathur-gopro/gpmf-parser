@@ -233,9 +233,11 @@ GPMF_ERR readMP4File(char *filename) {
   char utc_time[64] = "n/a";
   double lat = 0, lon = 0;
   int found_gps = 0;
-  uint32_t total_faces = 0;
-  char face_details[512] = "";
-  char scene_details[512] = "";
+  uint32_t max_faces = 0;
+  uint32_t face_ids[1024];
+  uint32_t face_ids_count = 0;
+  char face_details[512] = "none";
+  char scene_details[512] = "none";
 
 #if 1 // Search for GPMF Track
   size_t mp4handle =
@@ -329,16 +331,31 @@ GPMF_ERR readMP4File(char *filename) {
           }
         }
         GPMF_ResetState(ms);
-        while (GPMF_OK ==
-               GPMF_FindNext(ms, STR2FOURCC("FCNM"), GPMF_RECURSE_LEVELS)) {
-          uint32_t count = 0;
-          GPMF_ScaledData(ms, &count, 4, 0, 1, GPMF_TYPE_UNSIGNED_LONG);
-          total_faces += count;
+        uint32_t current_payload_faces = 0;
+        if (GPMF_OK ==
+            GPMF_FindNext(ms, STR2FOURCC("FCNM"), GPMF_RECURSE_LEVELS)) {
+          GPMF_ScaledData(ms, &current_payload_faces, 4, 0, 1,
+                          GPMF_TYPE_UNSIGNED_LONG);
         }
+
+        if (current_payload_faces > max_faces ||
+            (current_payload_faces > 0 && strcmp(face_details, "none") == 0)) {
+          max_faces = current_payload_faces;
+          GPMF_ResetState(ms);
+          if (GPMF_OK ==
+              GPMF_FindNext(ms, STR2FOURCC("FACE"), GPMF_RECURSE_LEVELS)) {
+            uint32_t samples = GPMF_Repeat(ms);
+            sprintf(face_details, "found %d face boxes", samples);
+          } else if (current_payload_faces > 0) {
+            sprintf(face_details, "detected %d faces (no boxes)",
+                    current_payload_faces);
+          }
+        }
+
+        // Track unique IDs
         GPMF_ResetState(ms);
-        if (face_details[0] == 0 &&
-            GPMF_OK ==
-                GPMF_FindNext(ms, STR2FOURCC("FACE"), GPMF_RECURSE_LEVELS)) {
+        if (GPMF_OK ==
+            GPMF_FindNext(ms, STR2FOURCC("FACE"), GPMF_RECURSE_LEVELS)) {
           uint32_t samples = GPMF_Repeat(ms);
           uint32_t elements = GPMF_ElementsInStruct(ms);
           uint32_t buffersize = samples * elements * sizeof(double);
@@ -346,20 +363,32 @@ GPMF_ERR readMP4File(char *filename) {
           if (tmp) {
             if (GPMF_OK == GPMF_ScaledData(ms, tmp, buffersize, 0, samples,
                                            GPMF_TYPE_DOUBLE)) {
-              sprintf(face_details, "found %d faces", samples);
+              for (uint32_t s = 0; s < samples; s++) {
+                if (elements >= 3) {
+                  uint32_t id = (uint32_t)tmp[s * elements + 2];
+                  int unique = 1;
+                  for (uint32_t k = 0; k < face_ids_count; k++) {
+                    if (face_ids[k] == id) {
+                      unique = 0;
+                      break;
+                    }
+                  }
+                  if (unique && face_ids_count < 1024) {
+                    face_ids[face_ids_count++] = id;
+                  }
+                }
+              }
             }
             free(tmp);
           }
         }
+
         GPMF_ResetState(ms);
-        if (scene_details[0] == 0 &&
+        if (strcmp(scene_details, "none") == 0 &&
             GPMF_OK ==
                 GPMF_FindNext(ms, STR2FOURCC("SCEN"), GPMF_RECURSE_LEVELS)) {
-          uint32_t key = 0;
-          float prob = 0;
-          // SCEN is often complex: FourCC + float
           char *data = (char *)GPMF_RawData(ms);
-          if (GPMF_RawDataSize(ms) >= 8) {
+          if (GPMF_RawDataSize(ms) >= 4) {
             sprintf(scene_details, "%c%c%c%c", data[0], data[1], data[2],
                     data[3]);
           }
@@ -650,10 +679,9 @@ GPMF_ERR readMP4File(char *filename) {
     }
 
     if (show_machine_readable) {
-      printf("RESULT_METADATA|%s|%.3f|%s|%.6f|%.6f|%u|%s|%s\n", filename,
-             GetVideoDuration(mp4handle), utc_time, lat, lon, total_faces,
-             face_details[0] ? face_details : "none",
-             scene_details[0] ? scene_details : "none");
+      printf("RESULT_METADATA|%s|%.3f|%s|%.6f|%.6f|%u|%u|%s|%s\n", filename,
+             GetVideoDuration(mp4handle), utc_time, lat, lon, max_faces,
+             face_ids_count, face_details, scene_details);
     }
 
   cleanup:

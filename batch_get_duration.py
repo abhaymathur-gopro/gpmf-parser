@@ -39,7 +39,7 @@ def process_mounted_dir(mount_path, script_path, csv_path=None, dry_run=False):
     
     csv_file = None
     csv_writer = None
-    headers = ["File Path", "Duration (s)", "DateTime (UTC)", "Latitude", "Longitude", "Face Count", "Face Details", "Scene Classifier"]
+    headers = ["File Path", "Duration (s)", "DateTime (UTC)", "Latitude", "Longitude", "Max Faces", "Distinct Faces", "Face Details", "Scene Classifier"]
     
     if csv_path:
         # Check if file exists to write headers
@@ -74,10 +74,10 @@ def process_mounted_dir(mount_path, script_path, csv_path=None, dry_run=False):
                         metadata, error = get_video_metadata(script_path, full_path)
                         
                         if metadata:
-                            # RESULT_METADATA|filename|duration|datetime|lat|long|face_count|face_details|scene_details
+                            # RESULT_METADATA|filename|duration|datetime|lat|long|max_faces|face_ids_count|face_details|scene_details
                             # We replace 'filename' with the 'display_path'
                             row = [display_path] + metadata[2:]
-                            print(f"Successfully extracted: Duration={metadata[2]}s, Lat={metadata[4]}, Lon={metadata[5]}, Faces={metadata[6]}")
+                            print(f"Successfully extracted: Duration={metadata[2]}s, Max Faces={metadata[6]}, Distinct Faces={metadata[7]}")
                             
                             if csv_writer:
                                 csv_writer.writerow(row)
