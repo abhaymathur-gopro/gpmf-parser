@@ -5,6 +5,7 @@ import sys
 import csv
 import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from tqdm import tqdm
 
 # Global lock for thread-safe CSV writing
 csv_lock = threading.Lock()
@@ -31,7 +32,7 @@ def get_video_metadata(script_path, local_path):
     except Exception as e:
         return None, f"Exception: {str(e)}"
 
-def process_single_file(file_info, script_path, csv_writer, csv_file):
+def process_single_file(file_info, script_path, csv_writer, csv_file, pbar=None):
     """
     Worker function to process a single video file.
     """
@@ -47,14 +48,25 @@ def process_single_file(file_info, script_path, csv_writer, csv_file):
             if csv_writer:
                 csv_writer.writerow(row)
                 csv_file.flush()
-            print(f"[{threading.current_thread().name}] Processed: {display_path} (Duration={metadata[2]}s, Max Faces={metadata[6]}, Distinct Faces={metadata[7]})")
+            msg = f"Processed: {display_path} (Duration={metadata[2]}s, Max Faces={metadata[6]}, Distinct Faces={metadata[7]})"
+            if pbar:
+                pbar.write(msg)
+            else:
+                print(msg)
     else:
-        print(f"[{threading.current_thread().name}] Failed: {display_path} - {error}")
+        msg = f"Failed: {display_path} - {error}"
+        if pbar:
+            pbar.write(msg)
+        else:
+            print(msg)
+            
+    if pbar:
+        pbar.update(1)
 
 def process_mounted_dir(mount_path, script_path, csv_path=None, dry_run=False, num_workers=40):
     """
     Recursively walks the mounted directory and filters for the video structure.
-    Processes files in parallel using ThreadPoolExecutor.
+    Processes files in parallel using ThreadPoolExecutor with a tqdm progress bar.
     """
     if not os.path.exists(mount_path):
         print(f"Error: Mount path '{mount_path}' does not exist.")
@@ -80,7 +92,7 @@ def process_mounted_dir(mount_path, script_path, csv_path=None, dry_run=False, n
         print("No matching videos found in the specified path structure.")
         return
 
-    print(f"Found {len(eligible_files)} videos. Starting parallel processing (workers={num_workers})...")
+    print(f"Found {len(eligible_files)} videos. Starting parallel processing (workers={num_workers})...\n")
     
     if dry_run:
         for _, display_path, _ in eligible_files:
@@ -100,13 +112,14 @@ def process_mounted_dir(mount_path, script_path, csv_path=None, dry_run=False, n
             csv_file.flush()
 
     try:
-        with ThreadPoolExecutor(max_workers=num_workers) as executor:
-            futures = [executor.submit(process_single_file, f, script_path, csv_writer, csv_file) for f in eligible_files]
-            for future in as_completed(futures):
-                try:
-                    future.result()
-                except Exception as e:
-                    print(f"Worker generated an exception: {e}")
+        with tqdm(total=len(eligible_files), desc="Processing Videos", unit="vid") as pbar:
+            with ThreadPoolExecutor(max_workers=num_workers) as executor:
+                futures = [executor.submit(process_single_file, f, script_path, csv_writer, csv_file, pbar) for f in eligible_files]
+                for future in as_completed(futures):
+                    try:
+                        future.result()
+                    except Exception as e:
+                        pbar.write(f"Worker generated an exception: {e}")
     finally:
         if csv_file:
             csv_file.close()
